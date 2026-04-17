@@ -3,7 +3,6 @@
 
 use ash::vk;
 use ash::{self, Device};
-use glam::Mat4;
 use log::{debug, error, info, warn};
 use std::ffi::CStr;
 use std::mem;
@@ -62,20 +61,36 @@ impl Vertex {
 
 /// Push constants structure for MVP matrix
 /// Optimized for fast updates on Vega 8
+/// Uses [[f32; 4]; 4] instead of Mat4 for bytemuck compatibility
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug)]
 pub struct PushConstants {
-    pub model: Mat4,
-    pub view: Mat4,
-    pub proj: Mat4,
+    pub model: [[f32; 4]; 4],
+    pub view: [[f32; 4]; 4],
+    pub proj: [[f32; 4]; 4],
 }
+
+// SAFETY: PushConstants is #[repr(C)] and contains only f32 arrays
+unsafe impl bytemuck::Pod for PushConstants {}
+unsafe impl bytemuck::Zeroable for PushConstants {}
 
 impl Default for PushConstants {
     fn default() -> Self {
         Self {
-            model: Mat4::IDENTITY,
-            view: Mat4::IDENTITY,
-            proj: Mat4::IDENTITY,
+            model: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            view: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+        }
+    }
+}
+
+impl PushConstants {
+    /// Create from glam matrices
+    pub fn from_mvp(model: glam::Mat4, view: glam::Mat4, proj: glam::Mat4) -> Self {
+        Self {
+            model: model.to_cols_array_2d(),
+            view: view.to_cols_array_2d(),
+            proj: proj.to_cols_array_2d(),
         }
     }
 }
@@ -289,7 +304,7 @@ impl Renderer {
         let entry = unsafe { ash::Entry::load()? };
 
         // Create Vulkan instance
-        let instance = Self::create_instance(&entry)?;
+        let instance = Self::create_instance(&entry, window)?;
 
         // Initialize surface loader for surface operations
         let surface_loader = unsafe { ash::khr::surface::Instance::new(&entry, &instance) };
@@ -312,7 +327,7 @@ impl Renderer {
 
         // Select physical device (prefer integrated GPU for AMD APU)
         let (physical_device, graphics_queue_family, compute_queue_family) =
-            Self::select_physical_device(&instance, surface)?;
+            Self::select_physical_device(&instance, &surface_loader, surface)?;
 
         info!(
             "Selected physical device: {:?}",
@@ -338,7 +353,7 @@ impl Renderer {
 
         // Create swapchain
         let (surface_format, extent, swapchain) =
-            Self::create_swapchain(&device, &surface_loader, physical_device, graphics_queue_family)?;
+            Self::create_swapchain(&device, &surface_loader, physical_device, surface, graphics_queue_family)?;
 
         // Create image views for swapchain
         let swapchain_images = Self::create_swapchain_image_views(&device, &swapchain_loader, swapchain, surface_format.format)?;
@@ -424,7 +439,7 @@ impl Renderer {
     }
 
     /// Create Vulkan instance with required extensions
-    fn create_instance(entry: &ash::Entry) -> Result<ash::Instance, vk::Result> {
+    fn create_instance(entry: &ash::Entry, window: &winit::window::Window) -> Result<ash::Instance, vk::Result> {
         let app_info = vk::ApplicationInfo {
             p_application_name: cstr!("Vulkan Cube Layer").as_ptr(),
             application_version: vk::make_api_version(0, 1, 0, 0),
@@ -432,8 +447,11 @@ impl Renderer {
             ..Default::default()
         };
 
-        // Get required extensions for windowing
-        let mut extensions = ash_window::enumerate_required_extensions(None)?.to_vec();
+        // Get required extensions for windowing (raw-window-handle 0.6)
+        let display_handle = window.display_handle().map_err(|e| {
+            vk::Result::ERROR_INITIALIZATION_FAILED
+        })?.as_raw();
+        let mut extensions = ash_window::enumerate_required_extensions(display_handle)?.to_vec();
         extensions.push(ash::ext::debug_utils::NAME);
         extensions.push(ash::khr::get_physical_device_properties2::NAME);
 
@@ -456,6 +474,7 @@ impl Renderer {
     /// Select physical device, preferring integrated GPU (AMD APU)
     fn select_physical_device(
         instance: &ash::Instance,
+        surface_loader: &ash::khr::surface::Instance,
         surface: vk::SurfaceKHR,
     ) -> Result<(vk::PhysicalDevice, u32, Option<u32>), Box<dyn std::error::Error>> {
         let devices = unsafe { instance.enumerate_physical_devices()? };
@@ -500,7 +519,7 @@ impl Renderer {
                     .queue_flags
                     .contains(vk::QueueFlags::COMPUTE);
                 let supports_present = unsafe {
-                    instance.get_physical_device_surface_support(device, i as u32, surface)?
+                    surface_loader.get_physical_device_surface_support(device, i as u32, surface)?
                 };
 
                 if supports_graphics && supports_present && graphics_queue.is_none() {
@@ -657,7 +676,7 @@ impl Renderer {
             present_mode,
             clipped: vk::TRUE,
             p_queue_family_indices: &graphics_queue_family as *const u32,
-            queue_family_count: 1,
+            queue_family_index_count: 1,
             ..Default::default()
         };
 
@@ -1031,9 +1050,9 @@ impl Renderer {
             self.device.reset_fences(&[frame_data.fence])?;
         }
 
-        // Acquire next swapchain image
+        // Acquire next swapchain image using swapchain_loader
         let (image_index, _) = unsafe {
-            self.device.acquire_next_image(
+            self.swapchain_loader.acquire_next_image(
                 self.swapchain,
                 u64::MAX,
                 frame_data.image_available_semaphore,
