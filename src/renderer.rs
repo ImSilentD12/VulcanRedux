@@ -8,6 +8,16 @@ use log::{debug, error, info, warn};
 use std::ffi::CStr;
 use std::mem;
 
+/// Macro for creating C strings - must be defined at the top for availability
+macro_rules! cstr {
+    ($s:expr) => {{
+        const fn check(s: &str) -> &str {
+            s
+        }
+        unsafe { CStr::from_bytes_with_nul_unchecked(check(concat!($s, "\0")).as_bytes()) }
+    }};
+}
+
 /// Maximum number of frames in flight for double buffering
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
@@ -24,29 +34,26 @@ impl Vertex {
     pub fn get_attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
         [
             // Position attribute (location = 0)
-            vk::VertexInputAttributeDescription::builder()
+            vk::VertexInputAttributeDescription::default()
                 .binding(0)
                 .location(0)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(0)
-                .build(),
+                .offset(0),
             // Color attribute (location = 1)
-            vk::VertexInputAttributeDescription::builder()
+            vk::VertexInputAttributeDescription::default()
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(mem::size_of::<[f32; 3]>() as u32)
-                .build(),
+                .offset(mem::size_of::<[f32; 3]>() as u32),
         ]
     }
 
     /// Get the vertex binding description
     pub fn get_binding_description() -> vk::VertexInputBindingDescription {
-        vk::VertexInputBindingDescription::builder()
+        vk::VertexInputBindingDescription::default()
             .binding(0)
             .stride(mem::size_of::<Vertex>() as u32)
             .input_rate(vk::VertexInputRate::VERTEX)
-            .build()
     }
 }
 
@@ -81,15 +88,15 @@ pub struct FrameData {
 }
 
 impl FrameData {
-    pub fn new(device: &Device) -> Result<Self, ash::ValidationError> {
-        let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
+    pub fn new(device: &Device) -> Result<Self, vk::Result> {
+        let command_pool_create_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
             .queue_family_index(0); // Graphics queue family
 
         unsafe {
             let command_pool = device.create_command_pool(&command_pool_create_info, None)?;
 
-            let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
+            let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(command_pool)
                 .level(vk::CommandBufferLevel::PRIMARY)
                 .command_buffer_count(1);
@@ -97,14 +104,14 @@ impl FrameData {
             let command_buffer =
                 unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)?[0] };
 
-            let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
+            let semaphore_create_info = vk::SemaphoreCreateInfo::default();
             let image_available_semaphore =
                 unsafe { device.create_semaphore(&semaphore_create_info, None)? };
             let render_finished_semaphore =
                 unsafe { device.create_semaphore(&semaphore_create_info, None)? };
 
             let fence_create_info =
-                vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
+                vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
             let fence = unsafe { device.create_fence(&fence_create_info, None)? };
 
             Ok(Self {
@@ -135,11 +142,11 @@ pub struct MemoryManager {
 }
 
 impl MemoryManager {
-    pub fn new(device: Device, physical_device: vk::PhysicalDevice) -> Self {
+    pub fn new(device: Device, physical_device: vk::PhysicalDevice, instance: &ash::Instance) -> Self {
         // Check if device supports unified memory architecture
         let mut memory_properties = vk::PhysicalDeviceMemoryProperties::default();
         unsafe {
-            physical_device.get_physical_device_memory_properties(&mut memory_properties);
+            instance.get_physical_device_memory_properties(physical_device, &mut memory_properties);
         }
 
         // Detect UMA by checking for DEVICE_LOCAL + HOST_VISIBLE memory types
@@ -161,7 +168,7 @@ impl MemoryManager {
         &self,
         buffer: vk::Buffer,
         _usage: vk::BufferUsageFlags,
-    ) -> Result<vk::DeviceMemory, ash::ValidationError> {
+    ) -> Result<vk::DeviceMemory, vk::Result> {
         let mem_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
 
         let properties = if self.is_uma {
@@ -175,7 +182,7 @@ impl MemoryManager {
         let memory_type_index =
             self.find_memory_type(mem_requirements.memory_type_bits, properties)?;
 
-        let alloc_info = vk::MemoryAllocateInfo::builder()
+        let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(memory_type_index);
 
@@ -213,7 +220,7 @@ impl MemoryManager {
         &self,
         memory: vk::DeviceMemory,
         size: usize,
-    ) -> Result<*mut T, ash::ValidationError> {
+    ) -> Result<*mut T, vk::Result> {
         self.device
             .map_memory(memory, 0, size as u64, vk::MemoryMapFlags::empty())
             .map(|ptr| ptr.as_ptr() as *mut T)
@@ -284,8 +291,8 @@ impl Renderer {
         info!(
             "Selected physical device: {:?}",
             unsafe {
-                physical_device
-                    .get_physical_device_properties()
+                instance
+                    .get_physical_device_properties(physical_device)
                     .device_name
             }
         );
@@ -386,8 +393,8 @@ impl Renderer {
     }
 
     /// Create Vulkan instance with required extensions
-    fn create_instance(entry: &ash::Entry) -> Result<ash::Instance, ash::ValidationError> {
-        let app_info = vk::ApplicationInfo::builder()
+    fn create_instance(entry: &ash::Entry) -> Result<ash::Instance, vk::Result> {
+        let app_info = vk::ApplicationInfo::default()
             .application_name(cstr!("Vulkan Cube Layer"))
             .application_version(vk::make_api_version(0, 1, 0, 0))
             .api_version(vk::API_VERSION_1_3); // Use Vulkan 1.3 for dynamic rendering
@@ -403,7 +410,7 @@ impl Renderer {
         #[cfg(not(debug_assertions))]
         let layer_names: Vec<&CStr> = vec![];
 
-        let instance_create_info = vk::InstanceCreateInfo::builder()
+        let instance_create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(&extensions)
             .enabled_layer_names(&layer_names);
@@ -431,7 +438,7 @@ impl Renderer {
         let mut best_compute_queue = None;
 
         for device in devices {
-            let props = unsafe { device.get_physical_device_properties() };
+            let props = unsafe { instance.get_physical_device_properties(device) };
             let score = match props.device_type {
                 vk::PhysicalDeviceType::INTEGRATED_GPU => {
                     info!("Found integrated GPU (preferred for AMD APU): {:?}", unsafe {
@@ -492,12 +499,12 @@ impl Renderer {
         physical_device: vk::PhysicalDevice,
         graphics_queue_family: u32,
         compute_queue_family: Option<u32>,
-    ) -> Result<(Device, vk::Queue, Option<vk::Queue>), ash::ValidationError> {
+    ) -> Result<(Device, vk::Queue, Option<vk::Queue>), vk::Result> {
         let mut queue_create_infos = Vec::new();
 
         // Graphics queue
         let graphics_priority = [1.0f32];
-        let graphics_queue_info = vk::DeviceQueueCreateInfo::builder()
+        let graphics_queue_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(graphics_queue_family)
             .queue_priorities(&graphics_priority);
         queue_create_infos.push(graphics_queue_info);
@@ -506,7 +513,7 @@ impl Renderer {
         if let Some(compute_family) = compute_queue_family {
             if compute_family != graphics_queue_family {
                 let compute_priority = [1.0f32];
-                let compute_queue_info = vk::DeviceQueueCreateInfo::builder()
+                let compute_queue_info = vk::DeviceQueueCreateInfo::default()
                     .queue_family_index(compute_family)
                     .queue_priorities(&compute_priority);
                 queue_create_infos.push(compute_queue_info);
@@ -514,11 +521,10 @@ impl Renderer {
         }
 
         // Enable features needed for dynamic rendering
-        let features = vk::PhysicalDeviceFeatures::builder()
-            .fill_mode_non_solid(true)
-            .build();
+        let features = vk::PhysicalDeviceFeatures::default()
+            .fill_mode_non_solid(true);
 
-        let device_create_info = vk::DeviceCreateInfo::builder()
+        let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_features(&features);
 
@@ -543,7 +549,7 @@ impl Renderer {
         surface: vk::SurfaceKHR,
         physical_device: vk::PhysicalDevice,
         graphics_queue_family: u32,
-    ) -> Result<(vk::SurfaceFormatKHR, vk::Extent2D, vk::SwapchainKHR), ash::ValidationError>
+    ) -> Result<(vk::SurfaceFormatKHR, vk::Extent2D, vk::SwapchainKHR), vk::Result>
     {
         let surface_formats =
             unsafe { device.get_physical_device_surface_formats(physical_device, surface)? };
@@ -591,7 +597,7 @@ impl Renderer {
             surface_capabilities.max_image_count,
         );
 
-        let create_info = vk::SwapchainCreateInfoKHR::builder()
+        let create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(image_count)
             .image_format(surface_format.format)
@@ -615,23 +621,22 @@ impl Renderer {
         device: &Device,
         swapchain: vk::SwapchainKHR,
         format: vk::Format,
-    ) -> Result<Vec<vk::ImageView>, ash::ValidationError> {
+    ) -> Result<Vec<vk::ImageView>, vk::Result> {
         let images = unsafe { device.get_swapchain_images(swapchain)? };
         let mut image_views = Vec::with_capacity(images.len());
 
         for image in images {
-            let create_info = vk::ImageViewCreateInfo::builder()
+            let create_info = vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::_2D)
                 .format(format)
                 .subresource_range(
-                    vk::ImageSubresourceRange::builder()
+                    vk::ImageSubresourceRange::default()
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
                         .base_mip_level(0)
                         .level_count(1)
                         .base_array_layer(0)
-                        .layer_count(1)
-                        .build(),
+                        .layer_count(1),
                 );
 
             let view = unsafe { device.create_image_view(&create_info, None)? };
@@ -645,11 +650,11 @@ impl Renderer {
     fn create_render_pass(
         device: &Device,
         format: vk::Format,
-    ) -> Result<vk::RenderPass, ash::ValidationError> {
+    ) -> Result<vk::RenderPass, vk::Result> {
         // Dynamic rendering doesn't use traditional render passes
         // We return VK_NULL_HANDLE and use DynamicRenderingInfo instead
         // But for API compatibility, we create a minimal render pass
-        let attachment_desc = vk::AttachmentDescription::builder()
+        let attachment_desc = vk::AttachmentDescription::default()
             .format(format)
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -657,28 +662,24 @@ impl Renderer {
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .build();
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
 
-        let color_attachment_ref = vk::AttachmentReference::builder()
+        let color_attachment_ref = vk::AttachmentReference::default()
             .attachment(0)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .build();
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
-        let subpass = vk::SubpassDescription::builder()
+        let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(&[color_attachment_ref])
-            .build();
+            .color_attachments(&[color_attachment_ref]);
 
-        let dependency = vk::SubpassDependency::builder()
+        let dependency = vk::SubpassDependency::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
             .dst_subpass(0)
             .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
             .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-            .build();
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
 
-        let render_pass_info = vk::RenderPassCreateInfo::builder()
+        let render_pass_info = vk::RenderPassCreateInfo::default()
             .attachments(&[attachment_desc])
             .subpasses(&[subpass])
             .dependencies(&[dependency]);
@@ -690,23 +691,22 @@ impl Renderer {
     fn create_shader_module(
         device: &Device,
         spirv: &[u8],
-    ) -> Result<vk::ShaderModule, ash::ValidationError> {
-        let create_info = vk::ShaderModuleCreateInfo::builder().code(spirv);
+    ) -> Result<vk::ShaderModule, vk::Result> {
+        let create_info = vk::ShaderModuleCreateInfo::default().code(spirv);
         unsafe { device.create_shader_module(&create_info, None) }
     }
 
     /// Create pipeline layout with push constants for MVP
     fn create_pipeline_layout(
         device: &Device,
-    ) -> Result<vk::PipelineLayout, ash::ValidationError> {
+    ) -> Result<vk::PipelineLayout, vk::Result> {
         // Push constant range for MVP matrix (3 x 16 floats = 192 bytes)
-        let push_constant_range = vk::PushConstantRange::builder()
+        let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
             .offset(0)
-            .size(mem::size_of::<PushConstants>() as u32)
-            .build();
+            .size(mem::size_of::<PushConstants>() as u32);
 
-        let create_info = vk::PipelineLayoutCreateInfo::builder()
+        let create_info = vk::PipelineLayoutCreateInfo::default()
             .push_constant_ranges(&[push_constant_range]);
 
         unsafe { device.create_pipeline_layout(&create_info, None) }
@@ -721,13 +721,13 @@ impl Renderer {
         extent: vk::Extent2D,
         vert_shader: vk::ShaderModule,
         frag_shader: vk::ShaderModule,
-    ) -> Result<vk::Pipeline, ash::ValidationError> {
-        let vert_stage = vk::PipelineShaderStageCreateInfo::builder()
+    ) -> Result<vk::Pipeline, vk::Result> {
+        let vert_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(vert_shader)
             .name(cstr!("main"));
 
-        let frag_stage = vk::PipelineShaderStageCreateInfo::builder()
+        let frag_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(frag_shader)
             .name(cstr!("main"));
@@ -737,33 +737,31 @@ impl Renderer {
         let binding_description = Vertex::get_binding_description();
         let attribute_descriptions = Vertex::get_attribute_descriptions();
 
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::builder()
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(std::slice::from_ref(&binding_description))
             .vertex_attribute_descriptions(&attribute_descriptions);
 
-        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
             .primitive_restart_enable(false);
 
-        let viewport = vk::Viewport::builder()
+        let viewport = vk::Viewport::default()
             .x(0.0)
             .y(0.0)
             .width(extent.width as f32)
             .height(extent.height as f32)
             .min_depth(0.0)
-            .max_depth(1.0)
-            .build();
+            .max_depth(1.0);
 
-        let scissor = vk::Rect2D::builder()
+        let scissor = vk::Rect2D::default()
             .offset(vk::Offset2D { x: 0, y: 0 })
-            .extent(extent)
-            .build();
+            .extent(extent);
 
-        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewports(std::slice::from_ref(&viewport))
             .scissors(std::slice::from_ref(&scissor));
 
-        let rasterizer = vk::PipelineRasterizationStateCreateInfo::builder()
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
             .depth_clamp_enable(false)
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
@@ -772,27 +770,26 @@ impl Renderer {
             .front_face(vk::FrontFace::CLOCKWISE)
             .depth_bias_enable(false);
 
-        let multisampling = vk::PipelineMultisampleStateCreateInfo::builder()
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .sample_shading_enable(false)
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::builder()
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::all())
-            .blend_enable(false)
-            .build();
+            .blend_enable(false);
 
-        let color_blending = vk::PipelineColorBlendStateCreateInfo::builder()
+        let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op_enable(false)
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
-        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::LESS)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
-        let create_info = vk::GraphicsPipelineCreateInfo::builder()
+        let create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
             .input_assembly_state(&input_assembly)
@@ -836,7 +833,7 @@ impl Renderer {
         let buffer_size = mem::size_of_val(&vertices) as u64;
 
         // Create buffer
-        let buffer_create_info = vk::BufferCreateInfo::builder()
+        let buffer_create_info = vk::BufferCreateInfo::default()
             .size(buffer_size)
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
@@ -883,7 +880,7 @@ impl Renderer {
         let buffer_size = mem::size_of_val(&indices) as u64;
 
         // Create buffer
-        let buffer_create_info = vk::BufferCreateInfo::builder()
+        let buffer_create_info = vk::BufferCreateInfo::default()
             .size(buffer_size)
             .usage(vk::BufferUsageFlags::INDEX_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
@@ -927,14 +924,14 @@ impl Renderer {
         };
 
         // Record command buffer
-        let cmd_begin = vk::CommandBufferBeginInfo::builder()
+        let cmd_begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
             self.device
                 .begin_command_buffer(frame_data.command_buffer, &cmd_begin)?;
 
             // Set up dynamic rendering
-            let color_attachment = vk::RenderingAttachmentInfo::builder()
+            let color_attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(self.swapchain_images[image_index as usize])
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -945,7 +942,7 @@ impl Renderer {
                     },
                 });
 
-            let rendering_info = vk::RenderingInfo::builder()
+            let rendering_info = vk::RenderingInfo::default()
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: self.extent,
@@ -995,7 +992,7 @@ impl Renderer {
 
         // Submit command buffer
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let submit_info = vk::SubmitInfo::builder()
+        let submit_info = vk::SubmitInfo::default()
             .wait_semaphores(&[frame_data.image_available_semaphore])
             .wait_dst_stage_mask(&wait_stages)
             .command_buffers(&[frame_data.command_buffer])
@@ -1007,13 +1004,13 @@ impl Renderer {
         }
 
         // Present
-        let present_info = vk::PresentInfoKHR::builder()
+        let present_info = vk::PresentInfoKHR::default()
             .wait_semaphores(&[frame_data.render_finished_semaphore])
             .swapchains(&[self.swapchain])
             .image_indices(&[image_index]);
 
         unsafe {
-            let khr = ash::extensions::khr::Swapchain::new(&self.entry, &self.instance, &self.device);
+            let khr = ash::khr::swapchain::Swapchain::new(&self.instance, &self.device);
             khr.queue_present(self.graphics_queue, &present_info)?;
         }
 
@@ -1093,14 +1090,3 @@ impl Drop for Renderer {
         }
     }
 }
-
-// Helper macro for CStr literals
-macro_rules! cstr {
-    ($s:expr) => {{
-        const S: &str = concat!($s, "\0");
-        unsafe { CStr::from_bytes_with_nul_unchecked(S.as_bytes()) }
-    }};
-}
-
-// Re-export for use in other modules
-pub use ash::extensions::khr;
