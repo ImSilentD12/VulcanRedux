@@ -1,0 +1,42 @@
+[package]
+name = "vulkan-cube-layer"
+version = "0.1.0"
+edition = "2021"
+description = "A foundational Vulkan 3D Cube renderer optimized for AMD APU with fork-ready architecture"
+
+[dependencies]
+# Vulkan bindings
+ash = "0.38"
+
+# Windowing and input
+winit = "0.30"
+
+# Window handle integration
+raw-window-handle = "0.6"
+
+# Math library for MVP matrices
+glam = "0.29"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+anyhow = "1.0"
+
+# Helper for safe transmutation
+bytemuck = "1.16"
+
+# Ash window helper for cross-platform surface creation
+ash-window = "0.13"
+
+[build-dependencies]
+# Shader compilation
+shaderc = "0.8"
+
+[features]
+default = []
+
+[[bin]]
+name = "vulkan-cube"
+path = "src/main.rs"
