@@ -16,7 +16,7 @@ mod renderer;
 use glam::{Mat4, Vec3};
 use log::{error, info};
 use raw_window_handle::HasWindowHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -106,17 +106,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Calculate MVP before borrowing renderer mutably (fixes E0502)
+                let window_size = self.window.as_ref().unwrap().inner_size();
+                let aspect_ratio = window_size.width as f32 / window_size.height as f32;
+                let mvp = self.calculate_mvp(aspect_ratio);
+
                 if let (Some(ref window), Some(ref mut renderer)) = (&self.window, &mut self.renderer) {
                     // Update rotation
                     let now = Instant::now();
                     let delta_time = now.duration_since(self.last_time).as_secs_f32();
                     self.last_time = now;
                     self.rotation_angle += delta_time * 0.5; // Rotate at 0.5 rad/s
-
-                    // Calculate MVP
-                    let window_size = window.inner_size();
-                    let aspect_ratio = window_size.width as f32 / window_size.height as f32;
-                    let mvp = self.calculate_mvp(aspect_ratio);
 
                     // Render frame
                     if let Err(e) = renderer.render(mvp) {

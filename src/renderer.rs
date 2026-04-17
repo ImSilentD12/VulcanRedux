@@ -3,7 +3,7 @@
 
 use ash::vk;
 use ash::{self, Device};
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use log::{debug, error, info, warn};
 use std::ffi::CStr;
 use std::mem;
@@ -205,9 +205,11 @@ impl MemoryManager {
         type_filter: u32,
         properties: vk::MemoryPropertyFlags,
     ) -> Result<u32, &'static str> {
+        // Get physical device from the device handle
+        let physical_device = self.device.get_physical_device();
         let mem_properties = unsafe {
             self.device
-                .get_physical_device_memory_properties(self.device.get_physical_device())
+                .get_physical_device_memory_properties(physical_device)
         };
 
         for i in 0..mem_properties.memory_type_count {
@@ -256,6 +258,8 @@ pub struct Renderer {
     graphics_queue: vk::Queue,
     compute_queue: Option<vk::Queue>,
     surface: vk::SurfaceKHR,
+    surface_loader: ash::khr::surface::Instance,
+    swapchain_loader: ash::khr::swapchain::Device,
     surface_format: vk::SurfaceFormatKHR,
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::ImageView>,
@@ -287,7 +291,10 @@ impl Renderer {
         // Create Vulkan instance
         let instance = Self::create_instance(&entry)?;
 
-        // Get raw window handles for surface creation
+        // Initialize surface loader for surface operations
+        let surface_loader = unsafe { ash::khr::surface::Instance::new(&entry, &instance) };
+
+        // Get raw window handles for surface creation (raw-window-handle 0.6)
         let wh = raw_handle.as_raw();
         let display_handle = match wh {
             raw_window_handle::RawWindowHandle::Xlib(x) => raw_window_handle::RawDisplayHandle::Xlib(x.display_handle),
@@ -298,7 +305,7 @@ impl Renderer {
             _ => return Err("Unsupported window handle type".into()),
         };
 
-        // Create surface using ash-window with both handles
+        // Create surface using ash-window with both handles (5 arguments for v0.13)
         let surface = unsafe {
             ash_window::create_surface(&entry, &instance, display_handle, wh, None)?
         };
@@ -323,15 +330,18 @@ impl Renderer {
             compute_queue_family,
         )?;
 
+        // Initialize swapchain loader for swapchain operations
+        let swapchain_loader = unsafe { ash::khr::swapchain::Device::new(&instance, &device) };
+
         // Create memory manager (UMA optimized) - pass instance reference
         let memory_manager = MemoryManager::new(device.clone(), physical_device, &instance);
 
         // Create swapchain
         let (surface_format, extent, swapchain) =
-            Self::create_swapchain(&device, surface, physical_device, graphics_queue_family)?;
+            Self::create_swapchain(&device, &surface_loader, physical_device, graphics_queue_family)?;
 
         // Create image views for swapchain
-        let swapchain_images = Self::create_swapchain_image_views(&device, swapchain, surface_format.format)?;
+        let swapchain_images = Self::create_swapchain_image_views(&device, &swapchain_loader, swapchain, surface_format.format)?;
 
         // Create render pass using Dynamic Rendering (Vulkan 1.3+)
         let render_pass = Self::create_render_pass(&device, surface_format.format)?;
@@ -393,6 +403,8 @@ impl Renderer {
             graphics_queue,
             compute_queue,
             surface,
+            surface_loader,
+            swapchain_loader,
             surface_format,
             swapchain,
             swapchain_images,
@@ -580,15 +592,16 @@ impl Renderer {
     /// Create swapchain
     fn create_swapchain(
         device: &Device,
-        surface: vk::SurfaceKHR,
+        surface_loader: &ash::khr::surface::Instance,
         physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
         graphics_queue_family: u32,
     ) -> Result<(vk::SurfaceFormatKHR, vk::Extent2D, vk::SwapchainKHR), vk::Result>
     {
         let surface_formats =
-            unsafe { device.get_physical_device_surface_formats(physical_device, surface)? };
+            unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface)? };
         let surface_capabilities =
-            unsafe { device.get_physical_device_surface_capabilities(physical_device, surface)? };
+            unsafe { surface_loader.get_physical_device_surface_capabilities(physical_device, surface)? };
 
         // Choose surface format
         let surface_format = surface_formats
@@ -602,7 +615,7 @@ impl Renderer {
 
         // Choose present mode (prefer mailbox for low latency)
         let present_modes =
-            unsafe { device.get_physical_device_surface_present_modes(physical_device, surface)? };
+            unsafe { surface_loader.get_physical_device_surface_present_modes(physical_device, surface)? };
         let present_mode = present_modes
             .iter()
             .find(|mode| *mode == vk::PresentModeKHR::MAILBOX)
@@ -656,10 +669,11 @@ impl Renderer {
     /// Create image views for swapchain images
     fn create_swapchain_image_views(
         device: &Device,
+        swapchain_loader: &ash::khr::swapchain::Device,
         swapchain: vk::SwapchainKHR,
         format: vk::Format,
     ) -> Result<Vec<vk::ImageView>, vk::Result> {
-        let images = unsafe { device.get_swapchain_images(swapchain)? };
+        let images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
         let mut image_views = Vec::with_capacity(images.len());
 
         for image in images {
@@ -673,7 +687,7 @@ impl Renderer {
 
             let create_info = vk::ImageViewCreateInfo {
                 image,
-                view_type: vk::ImageViewType::_2D,
+                view_type: vk::ImageViewType::TYPE_2D,
                 format,
                 subresource_range,
                 ..Default::default()
@@ -1130,8 +1144,7 @@ impl Renderer {
         };
 
         unsafe {
-            let khr = ash::khr::swapchain::Swapchain::new(&self.instance, &self.device);
-            khr.queue_present(self.graphics_queue, &present_info)?;
+            self.swapchain_loader.queue_present(self.graphics_queue, &present_info)?;
         }
 
         // Advance frame counter
@@ -1164,13 +1177,13 @@ impl Renderer {
 
         // Recreate swapchain
         let (surface_format, extent, swapchain) =
-            Self::create_swapchain(&self.device, self.surface, self.physical_device, self.graphics_queue_family)?;
+            Self::create_swapchain(&self.device, &self.surface_loader, self.physical_device, self.surface, self.graphics_queue_family)?;
 
         self.surface_format = surface_format;
         self.extent = extent;
         self.swapchain = swapchain;
         self.swapchain_images =
-            Self::create_swapchain_image_views(&self.device, swapchain, surface_format.format)?;
+            Self::create_swapchain_image_views(&self.device, &self.swapchain_loader, swapchain, surface_format.format)?;
 
         Ok(())
     }
@@ -1201,11 +1214,11 @@ impl Drop for Renderer {
             for view in self.swapchain_images.drain(..) {
                 self.device.destroy_image_view(view, None);
             }
-            self.device.destroy_swapchain(self.swapchain, None);
+            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
 
             // Destroy device and instance
             self.device.destroy_device(None);
-            self.instance.destroy_surface(self.surface, None);
+            self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
         }
     }
